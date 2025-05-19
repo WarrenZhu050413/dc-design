@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>DC Design</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    #gui { position: fixed; top: 10px; left: 10px; background: rgba(255,255,255,0.8); padding: 10px; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<div id="gui">
+  <h3>数据中心布线模拟</h3>
+  <div>
+    <label>添加机柜数量: <input v-model.number="newRackCount" type="number" min="1" /></label>
+    <button @click="addRacks">添加机柜</button>
+  </div>
+  <div>
+    <label>走线架高度: <input v-model.number="racewayHeight" type="number" step="0.1" /></label>
+    <button @click="updateRaceway">更新走线架</button>
+  </div>
+  <div>
+    <button @click="connectSelected">连接所选端口</button>
+  </div>
+  <div v-if="selectedCable">
+    <p>线缆长度: {{ selectedCable.length.toFixed(2) }}</p>
+    <p>路径: {{ selectedCable.path.map(p=>`(${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)})`).join(' -> ') }}</p>
+  </div>
+</div>
+
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script>
+const { createApp } = Vue;
+
+createApp({
+  data() {
+    return {
+      scene: null,
+      camera: null,
+      renderer: null,
+      racks: [],
+      raceway: null,
+      newRackCount: 1,
+      rackWidth: 0.6,
+      rackHeight: 2.0,
+      racewayHeight: 2.5,
+      selectedPorts: [],
+      cables: [],
+      selectedCable: null
+    }
+  },
+  mounted() {
+    this.initThree();
+    this.addRacks();
+    this.updateRaceway();
+    this.animate();
+  },
+  methods: {
+    initThree() {
+      this.scene = new THREE.Scene();
+      this.camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 100);
+      this.camera.position.set(0, 2, 5);
+      this.renderer = new THREE.WebGLRenderer({ antialias: true });
+      this.renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(this.renderer.domElement);
+      const light = new THREE.AmbientLight(0xffffff, 0.8);
+      this.scene.add(light);
+      const grid = new THREE.GridHelper(10, 10);
+      this.scene.add(grid);
+      window.addEventListener('resize', () => {
+        this.camera.aspect = window.innerWidth / window.innerHeight;
+        this.camera.updateProjectionMatrix();
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+      window.addEventListener('click', (e) => this.onClick(e));
+    },
+    addRacks() {
+      const startX = this.racks.length * this.rackWidth * 1.5;
+      for (let i = 0; i < this.newRackCount; i++) {
+        const geometry = new THREE.BoxGeometry(this.rackWidth, this.rackHeight, 0.8);
+        const material = new THREE.MeshStandardMaterial({ color: 0x333333 });
+        const rack = new THREE.Mesh(geometry, material);
+        rack.position.set(startX + i * this.rackWidth * 1.5, this.rackHeight / 2, 0);
+        rack.devices = [];
+        this.scene.add(rack);
+        this.racks.push(rack);
+        this.addDevice(rack); // 默认添加一个设备示例
+      }
+      this.updateRaceway();
+    },
+    updateRaceway() {
+      if (this.raceway) this.scene.remove(this.raceway);
+      const length = Math.max(1, this.racks.length * this.rackWidth * 1.5);
+      const geometry = new THREE.BoxGeometry(length, 0.1, 0.1);
+      const material = new THREE.MeshStandardMaterial({ color: 0xffaa00 });
+      this.raceway = new THREE.Mesh(geometry, material);
+      this.raceway.position.set(length / 2 - this.rackWidth * 0.75, this.racewayHeight, 0);
+      this.scene.add(this.raceway);
+    },
+    addDevice(rack) {
+      const geometry = new THREE.BoxGeometry(this.rackWidth * 0.9, 0.1, 0.7);
+      const material = new THREE.MeshStandardMaterial({ color: 0x2196F3 });
+      const device = new THREE.Mesh(geometry, material);
+      const uIndex = rack.devices.length;
+      device.position.set(rack.position.x, 0.05 + uIndex * 0.1, 0);
+      device.rack = rack;
+      device.ports = [
+        { position: new THREE.Vector3(device.position.x, device.position.y, device.position.z + 0.35) },
+        { position: new THREE.Vector3(device.position.x, device.position.y, device.position.z - 0.35) }
+      ];
+      this.scene.add(device);
+      rack.devices.push(device);
+    },
+    onClick(event) {
+      // 检测线缆点击
+      const rect = this.renderer.domElement.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(mouse, this.camera);
+      const intersects = raycaster.intersectObjects(this.cables, false);
+      if (intersects.length > 0) {
+        this.selectedCable = intersects[0].object.userData;
+      } else {
+        this.selectedCable = null;
+      }
+    },
+    selectPort(device, portIndex) {
+      const port = device.ports[portIndex];
+      this.selectedPorts.push({ device, port });
+      if (this.selectedPorts.length === 2) {
+        this.connectSelected();
+      }
+    },
+    connectSelected() {
+      if (this.selectedPorts.length < 2) return;
+      const a = this.selectedPorts[0];
+      const b = this.selectedPorts[1];
+      const path = [];
+      const y = this.racewayHeight;
+      path.push(new THREE.Vector3(a.port.position.x, a.port.position.y, a.port.position.z));
+      path.push(new THREE.Vector3(a.port.position.x, y, a.port.position.z));
+      path.push(new THREE.Vector3(b.port.position.x, y, b.port.position.z));
+      path.push(new THREE.Vector3(b.port.position.x, b.port.position.y, b.port.position.z));
+      let length = 0;
+      for (let i = 0; i < path.length - 1; i++) {
+        length += path[i].distanceTo(path[i + 1]);
+      }
+      const material = new THREE.LineBasicMaterial({ color: 0xff0000 });
+      const geometry = new THREE.BufferGeometry().setFromPoints(path);
+      const line = new THREE.Line(geometry, material);
+      line.userData = { length, path };
+      this.scene.add(line);
+      this.cables.push(line);
+      this.selectedPorts = [];
+    },
+    animate() {
+      requestAnimationFrame(this.animate);
+      this.renderer.render(this.scene, this.camera);
+    }
+  }
+}).mount('#gui');
+</script>
+</body>
+</html>
